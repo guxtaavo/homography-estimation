@@ -1,14 +1,12 @@
 # Assignment 2 - Computer Vision
 # Name: Gustavo Nunes Lopes
 
-# Import the required libraries
-# Add any other libraries you want
-
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import math
 import cv2 as cv
-
+import os
 
 ########################################################################################################################
 # Function to normalize points
@@ -17,37 +15,97 @@ import cv2 as cv
 #         T (normalization matrix)
 
 def normalize_points(points):
-    
-    
-    
-    return norm_points, T
+    points = to_homogeneous(points)
+    points = points / points[:, 2].reshape(-1, 1)
+
+    cx = np.mean(points[:, 0])
+    cy = np.mean(points[:, 1])
+
+    avg_distance = np.mean(np.sqrt((points[:, 0] - cx)**2 + (points[:, 1] - cy)**2))
+
+    if avg_distance == 0:
+        raise ValueError("Cannot normalize coincident points")
+
+    scale = np.sqrt(2) / avg_distance
+
+    T = np.array([[ scale,   0,    -scale*cx ],
+                  [ 0,     scale,  -scale*cy ],
+                  [ 0,       0,        1     ]])
+
+    norm_pts = (T @ points.T).T
+
+    return norm_pts, T
 
 # Function to build the matrix A of the DLT equation system
 # Input: pts1, pts2 (points "pts1" from the first image and points "pts2" from the second image satisfying pts2 = H.pts1)
 # Output: A (matrix containing the two or three rows resulting from the relation pts2 × H.pts1 = 0)
 
 def compute_A(pts1, pts2):
-    
-    return A
+    n = pts1.shape[0]
+    A = np.zeros((2 * n, 9))
 
+    for i in range(n):
+        x,  y,  w  = pts1[i]
+        xp, yp, wp = pts2[i]
+
+        A[2*i]   = [   0,    0,    0,  -wp*x, -wp*y, -wp*w,  yp*x,  yp*y,  yp*w]
+        A[2*i+1] = [ wp*x,  wp*y,  wp*w,   0,     0,     0, -xp*x, -xp*y, -xp*w]
+    return A
 
 # Normalized DLT function
 # Input: pts1, pts2 (points "pts1" from the first image and points "pts2" from the second image satisfying pts2 = H.pts1)
 # Output: H (estimated homography matrix)
 
 def compute_normalized_dlt(pts1, pts2):
+    norm_pts1, T1 = normalize_points(pts1)
+    norm_pts2, T2 = normalize_points(pts2)
 
-    # Normalize points
-    
-    # Build the equation system by stacking the matrix A for each pair of normalized corresponding points
-    
-    # Compute the SVD of the stacked matrix A and estimate the normalized homography H_normalized
-    
-    # Denormalize H_normalized to obtain H
-    
+    A = compute_A(norm_pts1, norm_pts2)
 
+    U, S, Vt = np.linalg.svd(A)
+
+    h = Vt[-1]
+    H_normalized = h.reshape(3, 3)
+
+    H = np.linalg.inv(T2) @ H_normalized @ T1
+
+    if abs(H[2, 2]) > 1e-12:
+        H = H / H[2, 2]
 
     return H
+
+def find_inliers(pts1, pts2, H, dis_threshold):
+    pts1 = to_homogeneous(pts1)
+    pts2 = to_homogeneous(pts2)
+
+    pts2 = pts2 / pts2[:, 2].reshape(-1, 1)
+
+    projected_pts2 = (H @ pts1.T).T
+    valid = np.abs(projected_pts2[:, 2]) > 1e-12
+
+    distances = np.full(pts1.shape[0], np.inf)
+
+    projected_pts2[valid] = projected_pts2[valid] / projected_pts2[valid, 2].reshape(-1, 1)
+    distances[valid] = np.sqrt(
+        (projected_pts2[valid, 0] - pts2[valid, 0]) ** 2 +
+        (projected_pts2[valid, 1] - pts2[valid, 1]) ** 2
+    )
+
+    inliers = distances < dis_threshold
+
+    return inliers
+
+def to_homogeneous(points):
+    points = np.asarray(points, dtype=np.float64)
+
+    if points.ndim == 3:
+        points = points.reshape(-1, points.shape[-1])
+
+    if points.shape[1] == 2:
+        ones = np.ones((points.shape[0], 1))
+        points = np.hstack([points, ones])
+
+    return points
 
 # RANSAC function
 # Inputs:
@@ -61,45 +119,64 @@ def compute_normalized_dlt(pts1, pts2):
 # H: estimated homography
 # pts1_in, pts2_in: set of inlier points from the first and second images
 
-
 def RANSAC(pts1, pts2, dis_threshold, N, Ninl):
-    
-    # Define other parameters such as the number of model samples, probabilities used in the equation for N, etc.
-    
+    pts1 = to_homogeneous(pts1)
+    pts2 = to_homogeneous(pts2)
 
-    # Loop
-    
-        # While the stopping criterion is not satisfied 
-        
-        
-        # Randomly select "s" samples from the set of point pairs pts1 and pts2 
-        
-        
-        # Use the samples to estimate a homography using the Normalized DLT 
-        
-        
-        # Test this homography with the remaining point pairs using dis_threshold and count 
-        # the number of supposed inliers obtained with the estimated model
-        
-        # If the number of inliers is the largest obtained so far, store this set along with 
-        # the "s" samples used.       
-        # Also update the required number N of iterations
-        
+    num_pts = pts1.shape[0]
 
-    # After exiting the loop
-    # Estimate the final homography H using all selected inliers.
-    
+    max_inliers = 0
+    best_H = None
+    best_pts1_in = None
+    best_pts2_in = None
 
-    return H, pts1_in, pts2_in
+    i = 0
 
+    while i < N:
+        indices = np.random.choice(num_pts, 4, replace=False)
+
+        sample_pts1 = pts1[indices]
+        sample_pts2 = pts2[indices]
+
+        try:
+            H = compute_normalized_dlt(sample_pts1, sample_pts2)
+        except (np.linalg.LinAlgError, ValueError):
+            i += 1
+            continue
+
+        if not np.all(np.isfinite(H)):
+            i += 1
+            continue
+
+        inliers = find_inliers(pts1, pts2, H, dis_threshold)
+        num_inliers = np.sum(inliers)
+
+        if num_inliers > max_inliers:
+            max_inliers = num_inliers
+            best_H = H
+            best_pts1_in = pts1[inliers]
+            best_pts2_in = pts2[inliers]
+
+        i += 1
+
+    if best_pts1_in is not None and len(best_pts1_in) >= 4:
+        best_H = compute_normalized_dlt(best_pts1_in, best_pts2_in)
+
+    print('Inliers:', max_inliers)
+    print('Iterações:', i)
+
+    return best_H, best_pts1_in, best_pts2_in
 
 ########################################################################################################################
 # Application example for testing your function for estimating homography
 
+PATH_IMAGES = os.path.join(os.path.dirname(__file__), '..', 'images')
+PATH_QUERY_IMAGE = os.path.join(PATH_IMAGES, 'box.jpg')
+PATH_TRAIN_IMAGE = os.path.join(PATH_IMAGES, 'photo01a.jpg')
 
 MIN_MATCH_COUNT = 10
-img1 = cv.imread('box.jpg', 0)   # queryImage
-img2 = cv.imread('photo01a.jpg', 0)        # trainImage
+img1 = cv.imread(PATH_QUERY_IMAGE, 0)   # queryImage
+img2 = cv.imread(PATH_TRAIN_IMAGE, 0)        # trainImage
 
 # SIFT initialization
 sift = cv.SIFT_create()
@@ -121,11 +198,11 @@ for m, n in matches:
         good.append(m)
 
 if len(good) > MIN_MATCH_COUNT:
-    src_pts = np.float32([ kp1[m.queryIdx].pt for m in good ]).reshape(-1, 1, 2)
-    dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ]).reshape(-1, 1, 2)
+    src_pts = np.float32([ kp1[m.queryIdx].pt for m in good ])
+    dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ])
     
     #################################################
-    M = # your function !!!!
+    M, pts1_in, pts2_in = RANSAC(src_pts, dst_pts, dis_threshold=5, N=1000, Ninl=10)
     #################################################
 
     img4 = cv.warpPerspective(img1, M, (img2.shape[1], img2.shape[0])) 
